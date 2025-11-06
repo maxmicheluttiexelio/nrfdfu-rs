@@ -218,11 +218,13 @@ impl BootloaderConnection {
     }
 
     pub fn set_receipt_notification(&mut self, every_n_packets: u16) -> crate::Result<()> {
+        log::debug!("Setting receipt notification to {every_n_packets}...");
         self.request_response(SetPrnRequest(every_n_packets))?;
         Ok(())
     }
 
     fn fetch_mtu(&mut self) -> crate::Result<u16> {
+        log::debug!("Fetching maximum transmission unit...");
         Ok(self.request_response(GetMtuRequest)?.0)
     }
 
