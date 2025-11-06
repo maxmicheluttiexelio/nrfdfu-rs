@@ -65,9 +65,18 @@ struct Args {
         long,
         global = true,
         default_value = "false",
-        help = "Get images before updating"
+        help = "Read firmware images (before updating)"
     )]
     get_images: bool,
+
+    #[arg(
+        short('p'),
+        long,
+        global = true,
+        default_value = "false",
+        help = "Select a serial port"
+    )]
+    port: Option<String>,
 }
 
 /// Previous errors occurred and were printed.
@@ -101,23 +110,29 @@ fn run() -> Result<()> {
     };
 
     let matching_ports: Vec<_> = available_ports()?
-        .into_iter()
-        .filter(|port| match &port.port_type {
-            serialport::SerialPortType::UsbPort(usb) => {
-                // macOS presents two serial devices - /dev/tty* for receiving
-                // incoming data and /dev/cu for dialling out. We can use
-                // either, but we only want one of them, so hide the /dev/tty
-                // devices.
-                #[cfg(target_os = "macos")]
-                if port.port_name.starts_with("/dev/tty") {
-                    return false;
-                }
-
-                usb.vid == USB_VID && usb.pid == USB_PID
+       .into_iter()
+       .filter(|port|{
+            if let Some(chosen_port) = &args.port &&
+                port.port_name != *chosen_port {
+                return false;
             }
-            _ => false,
-        })
-        .collect();
+            match &port.port_type {
+                serialport::SerialPortType::UsbPort(usb) => {
+                    // macOS presents two serial devices - /dev/tty* for receiving
+                    // incoming data and /dev/cu for dialling out. We can use
+                    // either, but we only want one of them, so hide the /dev/tty
+                    // devices.
+                    #[cfg(target_os = "macos")]
+                    if port.port_name.starts_with("/dev/tty") {
+                        return false;
+                    }
+                    
+                    usb.vid == USB_VID && usb.pid == USB_PID
+                },
+                _ => false,
+            }
+       })
+       .collect();
 
     match matching_ports.len() {
         0 => {
