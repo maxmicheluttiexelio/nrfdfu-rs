@@ -1,6 +1,10 @@
 use clap::Parser;
 use serialport::available_ports;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::path::PathBuf;
 use std::{error::Error, fs};
+use zip::ZipArchive;
 
 #[macro_use]
 mod macros;
@@ -39,7 +43,7 @@ struct Args {
     )]
     verbose: u8,
 
-    /// Directory with files to flash
+    /// Directory with files to flash or zip archive
     path: Option<std::path::PathBuf>,
 
     #[arg(
@@ -99,21 +103,31 @@ fn run() -> Result<()> {
 
     set_logger(args.verbose);
 
-    let image = if let Some(path) = args.path.as_ref() {
-        let manifest_path = path.join("manifest.json");
+    let (image, image_path) = if let Some(path) = args.path.as_ref() {
+        let tmp_path = std::path::PathBuf::from("/tmp/nrfdfu-rs/unzip");
+
+        let _ = fs::remove_dir_all(&tmp_path);
+        fs::create_dir_all(&tmp_path).unwrap();
+        let target_path = try_unzip(path, &tmp_path)?;
+
+        let manifest_path = target_path.join("manifest.json");
         let manifest_contents = fs::read_to_string(&manifest_path)?;
-        Some(serde_json::from_str::<RadioManifestJSONObject>(
-            &manifest_contents,
-        )?)
+        (
+            Some(serde_json::from_str::<RadioManifestJSONObject>(
+                &manifest_contents,
+            )?),
+            Some(target_path),
+        )
     } else {
-        None
+        (None, None)
     };
 
     let matching_ports: Vec<_> = available_ports()?
-       .into_iter()
-       .filter(|port|{
-            if let Some(chosen_port) = &args.port &&
-                port.port_name != *chosen_port {
+        .into_iter()
+        .filter(|port| {
+            if let Some(chosen_port) = &args.port
+                && port.port_name != *chosen_port
+            {
                 return false;
             }
             match &port.port_type {
@@ -126,13 +140,13 @@ fn run() -> Result<()> {
                     if port.port_name.starts_with("/dev/tty") {
                         return false;
                     }
-                    
+
                     usb.vid == USB_VID && usb.pid == USB_PID
-                },
+                }
                 _ => false,
             }
-       })
-       .collect();
+        })
+        .collect();
 
     match matching_ports.len() {
         0 => {
@@ -156,7 +170,7 @@ fn run() -> Result<()> {
     for port in matching_ports {
         let result = run_on_port(
             &port,
-            args.path.as_ref(),
+            image_path.as_ref(),
             image.clone(),
             args.get_images,
             args.abort,
@@ -241,13 +255,14 @@ fn run_on_port(
             let firmware_data = fs::read(&firmware_path)?;
             conn.send_init_packet(&init_packet_data)?;
             conn.send_firmware(&firmware_data)?;
+        }
+        if abort {
+            let mut conn = BootloaderConnection::wait_connection(port);
 
-            if abort {
-                let abort_result = conn.abort();
+            let abort_result = conn.abort();
 
-                if abort_result.is_ok() {
-                    log::warn!("Response received to Abort command (expected USB disconnect)");
-                }
+            if abort_result.is_ok() {
+                log::warn!("Response received to Abort command (expected USB disconnect)");
             }
         }
     }
@@ -270,4 +285,40 @@ fn set_logger(verbose: u8) {
         .filter_level(log_level)
         .parse_default_env()
         .init();
+}
+
+/// If the provided `path` is a folder, returns the provided path,
+/// otherwise, tries to unzip the specified archive inside the `unzip_path` folder.
+///
+/// If `unzip_path` already exists as a non-empty directory, this operation will fail
+pub fn try_unzip(
+    path: &std::path::Path,
+    unzip_path: &std::path::Path,
+) -> std::result::Result<PathBuf, &'static str> {
+    if path.is_file() {
+        let target_dir = PathBuf::from(unzip_path);
+        if fs::exists(&target_dir).unwrap_or(false) {
+            // if unzip target dir exists, purge all its contents
+            let is_empty = target_dir.read_dir().unwrap().next().is_none();
+            if !is_empty {
+                return Err("target directory is not empty");
+            }
+        } else {
+            // if unzip target dir does not exist create it
+            fs::create_dir_all(&target_dir).unwrap();
+        }
+        let extension = path.extension();
+        if extension == Some(OsStr::new("zip")) {
+            let archive_file = File::open(path).unwrap();
+            let mut archive = ZipArchive::new(archive_file).map_err(|_| "invalid path")?;
+            archive.extract(&target_dir).map_err(|_| "invalid zip")?;
+            Ok(target_dir)
+        } else {
+            Err("Invalid path")
+        }
+    } else if path.is_dir() {
+        Ok(PathBuf::from(path))
+    } else {
+        Err("invalid path")
+    }
 }
