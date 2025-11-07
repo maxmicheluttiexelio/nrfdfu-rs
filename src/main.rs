@@ -77,7 +77,6 @@ struct Args {
         short('p'),
         long,
         global = true,
-        default_value = "false",
         help = "Select a serial port"
     )]
     port: Option<String>,
